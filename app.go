@@ -464,7 +464,7 @@ func (a *App) runFrame() {
 	// Update input state for next frame (Ebiten-style polling)
 	// This must be called before onUpdate so JustPressed/JustReleased work correctly
 	if a.inputState != nil {
-		a.inputState.Keyboard().UpdateFrame()
+		a.inputState.Update()
 	}
 
 	// onUpdate: ALWAYS when loop is active (ANIMATING + CONTINUOUS).
@@ -472,11 +472,6 @@ func (a *App) runFrame() {
 	// If something changed, they call RequestRedraw() → invalidated = true.
 	if a.onUpdate != nil {
 		a.onUpdate(deltaTime)
-	}
-
-	// Update mouse input state
-	if a.inputState != nil {
-		a.inputState.Mouse().UpdateFrame()
 	}
 
 	// Check if onUpdate triggered RequestRedraw (UI spinner, animation tick).
@@ -1101,19 +1096,14 @@ func (a *App) modalFrameTick() {
 		deltaTime = 0.066
 	}
 
-	// Update keyboard input state
+	// Update input state
 	if a.inputState != nil {
-		a.inputState.Keyboard().UpdateFrame()
+		a.inputState.Update()
 	}
 
 	// User logic callback
 	if a.onUpdate != nil {
 		a.onUpdate(deltaTime)
-	}
-
-	// Update mouse input state
-	if a.inputState != nil {
-		a.inputState.Mouse().UpdateFrame()
 	}
 
 	// Propagate PHYSICAL window size to render thread for swapchain resize.
