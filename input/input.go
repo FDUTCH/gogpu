@@ -19,15 +19,6 @@ func New() *State {
 	}
 }
 
-// Update should be called each frame to update input state.
-// This advances the "just pressed/released" tracking to the next frame.
-// Thread-safe.
-func (s *State) Update() {
-	// Use the thread-safe UpdateFrame methods
-	s.keyboard.UpdateFrame()
-	s.mouse.UpdateFrame()
-}
-
 // Keyboard returns the keyboard state.
 func (s *State) Keyboard() *KeyboardState {
 	return &s.keyboard

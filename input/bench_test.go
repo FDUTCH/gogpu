@@ -232,6 +232,7 @@ func BenchmarkInputStateUpdate(b *testing.B) {
 	s.Mouse().SetPosition(400, 300)
 	s.Mouse().SetButton(MouseButtonLeft, true)
 	for b.Loop() {
-		s.Update()
+		s.keyboard.UpdateFrame()
+		s.mouse.UpdateFrame()
 	}
 }
