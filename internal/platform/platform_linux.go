@@ -334,6 +334,14 @@ func translateX11Event(event x11.PlatformEvent, inner *x11.Platform, windowID Wi
 		return Event{Type: EventScroll, Scroll: event.Scroll, WindowID: windowID}
 	case x11.EventTypeExpose:
 		return Event{Type: EventExpose, WindowID: windowID}
+	case x11.EventTypeDragEnter:
+		return Event{Type: EventDragEnter, DragPaths: event.DragPaths, DragX: event.DragX, DragY: event.DragY, WindowID: windowID}
+	case x11.EventTypeDragMove:
+		return Event{Type: EventDragMove, DragX: event.DragX, DragY: event.DragY, WindowID: windowID}
+	case x11.EventTypeDragDrop:
+		return Event{Type: EventDragDrop, DragPaths: event.DragPaths, DragX: event.DragX, DragY: event.DragY, WindowID: windowID}
+	case x11.EventTypeDragLeave:
+		return Event{Type: EventDragLeave, WindowID: windowID}
 	default:
 		return Event{Type: EventNone}
 	}
@@ -2831,12 +2839,15 @@ func (p *waylandPlatform) PollEvents() Event {
 			}
 		}
 
-		// FRAME-001: Check if the compositor acked our frame callback.
-		// If so, queue an expose event to trigger a redraw. This ensures
-		// the render loop does not skip the next frame when in IDLE mode
-		// (where WaitEvents blocks until an event arrives).
-		if wayland.FrameCallbackEnabled() && p.libwl.ConsumeFrameCallbackReady() {
-			w.queueEvent(Event{Type: EventExpose, WindowID: p.primaryWindowID})
+		// FRAME-001: Consume frame callback ready state. The done event
+		// already unblocked WaitEvents (data on display fd). The frame
+		// callback acts as a GATE (via frameCallbackReady() in app.go:485),
+		// NOT a TRIGGER. Synthesizing EventExpose here caused a perpetual
+		// 60 FPS render loop even with ContinuousRender=false (#379).
+		// winit separates "compositor ready" (gate) from "app wants to draw"
+		// (redraw request) — we now do the same.
+		if wayland.FrameCallbackEnabled() {
+			p.libwl.ConsumeFrameCallbackReady()
 		}
 	}
 
