@@ -4,6 +4,7 @@ package platform
 
 import (
 	"fmt"
+	"log/slog"
 	"sync"
 	"syscall"
 	"time"
@@ -41,6 +42,7 @@ const (
 	swShow             = 5
 	swShowNA           = 8
 	swRestore          = 9
+	swHide             = 0 // SW_HIDE
 	pmRemove           = 0x0001
 	wsOverlappedWindow = 0x00CF0000
 	wsVisible          = 0x10000000
@@ -708,7 +710,13 @@ func enableDwmBlurBehind(hwnd windows.HWND) {
 		fEnable:  1, // TRUE
 		hRgnBlur: rgn,
 	}
-	procDwmEnableBlurBehindWindow.Call(uintptr(hwnd), uintptr(unsafe.Pointer(&bb)))
+	hr, _, _ := procDwmEnableBlurBehindWindow.Call(uintptr(hwnd), uintptr(unsafe.Pointer(&bb)))
+	if hr != 0 {
+		// Non-fatal: DWM can be unavailable (e.g. Server Core, DWM disabled);
+		// the window simply stays opaque.
+		slog.Debug("gogpu: DwmEnableBlurBehindWindow failed, window stays opaque",
+			"hr", hr)
+	}
 }
 
 // createWindowWin32 creates a new Win32 HWND window from the given config.
@@ -1060,6 +1068,28 @@ func (w *win32Window) Show() {
 	procSetForegroundWindow.Call(uintptr(w.hwnd))
 	procSetFocusW.Call(uintptr(w.hwnd))
 	procUpdateWindow.Call(uintptr(w.hwnd))
+}
+
+// Hide hides the window (ShowWindow with SW_HIDE).
+func (w *win32Window) Hide() {
+	procShowWindow.Call(uintptr(w.hwnd), swHide)
+}
+
+// SetPosition moves the window to the given logical screen position (DIP),
+// scaling to physical pixels with the window's current DPI. Size and
+// Z-order are preserved (winit pattern).
+func (w *win32Window) SetPosition(x, y int) {
+	dpi, _, _ := procGetDpiForWindow.Call(uintptr(w.hwnd))
+	if dpi == 0 {
+		dpi = 96
+	}
+	scale := float64(dpi) / 96.0
+	physX := int32(float64(x) * scale)
+	physY := int32(float64(y) * scale)
+
+	procSetWindowPos.Call(uintptr(w.hwnd), 0,
+		uintptr(physX), uintptr(physY), 0, 0,
+		swpNoSize|swpNoZOrder|swpNoActivate)
 }
 
 func (w *win32Window) SyncFrame() {
