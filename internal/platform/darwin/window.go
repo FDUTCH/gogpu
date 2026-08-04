@@ -23,6 +23,7 @@ type WindowConfig struct {
 	Resizable         bool
 	Fullscreen        bool
 	Frameless         bool
+	Transparent       bool
 	TabbingMode       int
 	TabbingIdentifier string
 }
@@ -127,6 +128,20 @@ func NewWindow(config WindowConfig) (*Window, error) {
 		if title != nil {
 			nsWindow.SendPtr(selectors.setTitle, title.ID().Ptr())
 			title.Release()
+		}
+	}
+
+	// Per-pixel alpha: the window must not be opaque or AppKit fills the
+	// background black and the compositor ignores the surface alpha.
+	// SDL3 sets all three (opaque=NO, hasShadow=NO, backgroundColor=clearColor):
+	// without clearColor AppKit composites the swapchain alpha over an opaque
+	// background; without hasShadow=NO the system shadow renders incorrectly
+	// for overlay/popup windows.
+	if config.Transparent {
+		nsWindow.SendBool(selectors.setOpaque, false)
+		nsWindow.SendBool(selectors.setHasShadow, false)
+		if color := classes.NSColor.Send(selectors.clearColor); !color.IsNil() {
+			nsWindow.SendPtr(selectors.setBackgroundColor, color.Ptr())
 		}
 	}
 

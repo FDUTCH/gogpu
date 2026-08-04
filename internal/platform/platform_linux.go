@@ -237,17 +237,18 @@ func (p *x11Platform) Init() error {
 // CreateWindow creates an X11 window.
 func (p *x11Platform) CreateWindow(config Config) (PlatformWindow, error) {
 	x11Config := x11.Config{
-		Title:      config.Title,
-		Width:      config.Width,
-		Height:     config.Height,
-		Resizable:  config.Resizable,
-		Fullscreen: config.Fullscreen,
-		Frameless:  config.Frameless,
-		MinWidth:   config.MinWidth,
-		MinHeight:  config.MinHeight,
-		MaxWidth:   config.MaxWidth,
-		MaxHeight:  config.MaxHeight,
-		Icon:       config.Icon,
+		Title:       config.Title,
+		Width:       config.Width,
+		Height:      config.Height,
+		Resizable:   config.Resizable,
+		Fullscreen:  config.Fullscreen,
+		Frameless:   config.Frameless,
+		Transparent: config.Transparent,
+		MinWidth:    config.MinWidth,
+		MinHeight:   config.MinHeight,
+		MaxWidth:    config.MaxWidth,
+		MaxHeight:   config.MaxHeight,
+		Icon:        config.Icon,
 	}
 
 	if p.primaryWindowID != 0 {
@@ -961,6 +962,10 @@ func (p *waylandPlatform) Init() error {
 // The first call initializes the primary connection. Subsequent calls create
 // secondary windows each with their own independent Wayland connection and surface.
 func (p *waylandPlatform) CreateWindow(config Config) (PlatformWindow, error) {
+	// TODO(#361, ADR-060): Wayland transparency — explicitly call
+	// wl_surface_set_opaque_region(NULL) when config.Transparent is set.
+	// For now Config.Transparent is silently ignored: Wayland surfaces have
+	// no opaque region by default, so surface alpha already composites.
 	if p.libwl != nil {
 		// Secondary window: open a new independent Wayland connection.
 		sec, err := p.createSecondaryConn(config)

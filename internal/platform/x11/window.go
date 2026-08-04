@@ -10,30 +10,43 @@ import (
 
 // WindowConfig holds configuration for creating a window.
 type WindowConfig struct {
-	Title      string
-	Width      uint16
-	Height     uint16
-	X          int16
-	Y          int16
-	Resizable  bool
-	Fullscreen bool
+	Title       string
+	Width       uint16
+	Height      uint16
+	X           int16
+	Y           int16
+	Resizable   bool
+	Fullscreen  bool
+	Transparent bool
 }
 
-// CreateWindow creates a new X11 window.
-func (c *Connection) CreateWindow(config WindowConfig) (ResourceID, error) {
+// X11 visual class for TrueColor (depth 24/32).
+const classTrueColor = 4
+
+// allocNone is the AllocNone value for CreateColormap: the server allocates
+// color cells lazily from the colormap.
+const allocNone = 0
+
+// CreateWindow creates a new X11 window. It returns the window ID and, when
+// a transparent ARGB visual was used, the matching colormap ID (0 otherwise)
+// so callers can free it on teardown.
+func (c *Connection) CreateWindow(config WindowConfig) (ResourceID, ResourceID, error) {
 	screen := c.DefaultScreen()
 	if screen == nil {
-		return 0, fmt.Errorf("x11: no default screen")
+		return 0, 0, fmt.Errorf("x11: no default screen")
 	}
 
 	// Generate window ID
 	windowID := c.GenerateID()
+	colormap := ResourceID(0)
 
 	// Background pixmap None, not a black BackPixel: a black BackPixel makes the X
 	// server paint newly-exposed areas black on resize before the GPU repaints
 	// (black flicker). None leaves the background untouched — we repaint on resize
 	// and Expose. GLFW/SDL/Chromium pattern.
-	valueMask := uint32(CWBackPixmap | CWEventMask)
+	valueMask := uint32(CWBackPixmap)
+	depth := screen.RootDepth
+	visual := screen.RootVisual
 
 	// Event mask - listen for common events
 	eventMask := uint32(
@@ -49,39 +62,143 @@ func (c *Connection) CreateWindow(config WindowConfig) (ResourceID, error) {
 			EventMaskLeaveWindow |
 			EventMaskPropertyChange)
 
-	// Value list (order matters - must match bit order in valueMask)
-	valueList := []uint32{
-		0,         // CWBackPixmap = None — no background fill on resize (anti-flicker)
-		eventMask, // CWEventMask
+	// Value list (order matters — must match ascending bit order in valueMask).
+	// CWBackPixmap = None — no background fill on resize (anti-flicker).
+	valueList := []uint32{0}
+
+	// Per-pixel alpha: create the window with a 32-bit ARGB visual and a
+	// matching colormap so the compositor can blend the surface alpha
+	// against the desktop (GLFW/SDL3 pattern, ADR-060). Falls back to the
+	// root visual when no ARGB visual is available — transparency then
+	// silently degrades to opaque.
+	if config.Transparent {
+		if argb, argbDepth, ok := findARGBVisual(screen); ok {
+			cmap := c.GenerateID()
+			if err := c.CreateColormap(cmap, screen.Root, argb.VisualID, allocNone); err != nil {
+				return 0, 0, err
+			}
+			colormap = cmap
+			depth = argbDepth
+			visual = argb.VisualID
+			// X11 requires CWBorderPixel when the window depth differs from
+			// the root visual; omitting it makes XCreateWindow return BadMatch
+			// (winit sets border_pixel(0) for the same reason).
+			valueMask |= CWBorderPixel
+			valueList = append(valueList, 0) // CWBorderPixel = 0
+			valueMask |= CWColormap
+		}
 	}
 
-	// Build request
-	// Request length = 8 + len(valueList) in 4-byte units
-	reqLen := uint16(8 + len(valueList))
+	valueMask |= CWEventMask
+	valueList = append(valueList, eventMask) // CWEventMask
+	if colormap != 0 {
+		valueList = append(valueList, uint32(colormap)) // CWColormap
+	}
 
-	e := NewEncoder(c.byteOrder)
+	req := encodeCreateWindowRequest(
+		c.byteOrder, windowID, screen.Root,
+		config.X, config.Y, config.Width, config.Height,
+		depth, visual, valueMask, valueList,
+	)
+
+	if _, err := c.sendRequest(req); err != nil {
+		return 0, 0, fmt.Errorf("x11: CreateWindow failed: %w", err)
+	}
+
+	return windowID, colormap, nil
+}
+
+// encodeCreateWindowRequest builds the CreateWindow request body.
+// Request length = 8 + len(valueList) in 4-byte units.
+func encodeCreateWindowRequest(bo ByteOrder, windowID ResourceID, parent ResourceID, x, y int16, width, height uint16, depth uint8, visual uint32, valueMask uint32, valueList []uint32) []byte {
+	e := NewEncoder(bo)
 	e.PutUint8(OpcodeCreateWindow)
-	e.PutUint8(screen.RootDepth) // depth
-	e.PutUint16(reqLen)
+	e.PutUint8(depth) // depth
+	e.PutUint16(uint16(8 + len(valueList)))
 	e.PutUint32(uint32(windowID))
-	e.PutUint32(uint32(screen.Root))
-	e.PutInt16(config.X)
-	e.PutInt16(config.Y)
-	e.PutUint16(config.Width)
-	e.PutUint16(config.Height)
+	e.PutUint32(uint32(parent))
+	e.PutInt16(x)
+	e.PutInt16(y)
+	e.PutUint16(width)
+	e.PutUint16(height)
 	e.PutUint16(0) // border width
 	e.PutUint16(WindowClassInputOutput)
-	e.PutUint32(screen.RootVisual)
+	e.PutUint32(visual)
 	e.PutUint32(valueMask)
 	for _, v := range valueList {
 		e.PutUint32(v)
 	}
+	return e.Bytes()
+}
 
-	if _, err := c.sendRequest(e.Bytes()); err != nil {
-		return 0, fmt.Errorf("x11: CreateWindow failed: %w", err)
+// findARGBVisual returns a 32-bit TrueColor visual whose RGB masks leave
+// the top byte free for alpha, plus its depth. Returns ok=false when the
+// screen has no ARGB visual so callers can fall back to the root visual.
+func findARGBVisual(screen *ScreenInfo) (VisualType, uint8, bool) {
+	if screen == nil {
+		return VisualType{}, 0, false
 	}
+	for _, depth := range screen.Depths {
+		if depth.Depth != 32 {
+			continue
+		}
+		for _, v := range depth.Visuals {
+			if v.Class != classTrueColor {
+				continue
+			}
+			mask := v.RedMask | v.GreenMask | v.BlueMask
+			// A 32-bit TrueColor visual without alpha covers all 32 bits;
+			// an ARGB visual leaves the top byte unoccupied.
+			if mask != 0 && mask != 0xFFFFFFFF {
+				return v, depth.Depth, true
+			}
+		}
+	}
+	return VisualType{}, 0, false
+}
 
-	return windowID, nil
+// createColormapRequest builds the CreateColormap request body.
+// Wire format: opcode, unused, length=5, colormap, window, visual, alloc, pad.
+func createColormapRequest(bo ByteOrder, id, window ResourceID, visual uint32, alloc uint8) []byte {
+	e := NewEncoder(bo)
+	e.PutUint8(OpcodeCreateColormap)
+	e.PutUint8(0)  // unused
+	e.PutUint16(5) // length: 20 bytes / 4
+	e.PutUint32(uint32(id))
+	e.PutUint32(uint32(window))
+	e.PutUint32(visual)
+	e.PutUint8(alloc)
+	e.PutPad()
+	return e.Bytes()
+}
+
+// CreateColormap creates a colormap for the given visual.
+func (c *Connection) CreateColormap(id, window ResourceID, visual uint32, alloc uint8) error {
+	req := createColormapRequest(c.byteOrder, id, window, visual, alloc)
+	if _, err := c.sendRequest(req); err != nil {
+		return fmt.Errorf("x11: CreateColormap failed: %w", err)
+	}
+	return nil
+}
+
+// FreeColormap frees a colormap resource.
+func (c *Connection) FreeColormap(colormap ResourceID) error {
+	req := createFreeColormapRequest(c.byteOrder, colormap)
+	if _, err := c.sendRequest(req); err != nil {
+		return fmt.Errorf("x11: FreeColormap failed: %w", err)
+	}
+	return nil
+}
+
+// createFreeColormapRequest builds the FreeColormap request body.
+// Wire format: opcode, unused, length=2, colormap.
+func createFreeColormapRequest(bo ByteOrder, colormap ResourceID) []byte {
+	e := NewEncoder(bo)
+	e.PutUint8(OpcodeFreeColormap)
+	e.PutUint8(0)  // unused
+	e.PutUint16(2) // length
+	e.PutUint32(uint32(colormap))
+	return e.Bytes()
 }
 
 // MapWindow makes a window visible.
