@@ -53,7 +53,12 @@ func (m *mockWindow) SetMaxSize(w, h int)           { m.maxWidth = w; m.maxHeigh
 func (m *mockWindow) RequestSize(w, h int)          { m.width = w; m.height = h }
 func (m *mockWindow) SetModalFrameCallback(func())  {}
 func (m *mockWindow) Destroy()                      {}
-func (m *mockWindow) ScaleFactor() float64          { return m.scaleFactor }
+func (m *mockWindow) StartDrag(_ []string, done func(platform.DragResult)) {
+	if done != nil {
+		done(platform.DragCancelled)
+	}
+}
+func (m *mockWindow) ScaleFactor() float64 { return m.scaleFactor }
 func (m *mockWindow) PrepareFrame() platform.PrepareFrameResult {
 	w, h := m.PhysicalSize()
 	return platform.PrepareFrameResult{

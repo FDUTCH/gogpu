@@ -151,7 +151,12 @@ func (m *mockPlatformWindow) SetFullscreen(bool)               {}
 func (m *mockPlatformWindow) IsFullscreen() bool               { return false }
 func (m *mockPlatformWindow) SetModalFrameCallback(func())     {}
 func (m *mockPlatformWindow) Destroy()                         {}
-func (m *mockPlatformWindow) SetOnClose(func() bool)           {}
+func (m *mockPlatformWindow) StartDrag(_ []string, done func(DragResult)) {
+	if done != nil {
+		done(DragCancelled)
+	}
+}
+func (m *mockPlatformWindow) SetOnClose(func() bool) {}
 
 func (m *mockPlatformWindow) SetFrameless(v bool) { m.frameless = v }
 func (m *mockPlatformWindow) IsFrameless() bool   { return m.frameless }
