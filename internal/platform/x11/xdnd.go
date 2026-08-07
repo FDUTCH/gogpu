@@ -201,16 +201,15 @@ func (p *Platform) handleXdndPosition(w *x11Window, data [5]uint32) PlatformEven
 	x := float64(data[2] >> 16)
 	y := float64(data[2] & 0xFFFF)
 
-	// Convert root coordinates to window-local coordinates.
-	// XdndPosition sends root-relative coords; we need window-relative.
+	// Convert root coordinates to window-local using TranslateCoordinates.
+	// GetGeometry returns parent-relative coords which are wrong for reparented
+	// windows (all WM-managed). Qt6 uses xcb_translate_coordinates (qxcbdrag.cpp:282).
 	if w.window != 0 {
-		geom, err := p.conn.getGeometry(w.window)
+		_, dstX, dstY, err := p.conn.TranslateCoordinates(
+			p.conn.RootWindow(), w.window, int16(data[2]>>16), int16(data[2]&0xFFFF))
 		if err == nil {
-			// Translate root coords to window coords by subtracting window origin.
-			// For nested windows, we need TranslateCoordinates, but for
-			// top-level windows getGeometry + border gives us the offset.
-			x -= float64(geom.x)
-			y -= float64(geom.y)
+			x = float64(dstX)
+			y = float64(dstY)
 		}
 	}
 
@@ -270,10 +269,12 @@ func (p *Platform) handleXdndLeave(w *x11Window) PlatformEvent {
 }
 
 // waitForXdndSelectionNotify pumps events until SelectionNotify arrives for
-// the XDND selection, or until a 1-second timeout. This mirrors the clipboard
-// read pattern (clipboard.go:ClipboardRead).
+// the XDND selection, or until a 2-second timeout. Late-arriving XdndPosition
+// events are processed here — TCP batching can cause them to arrive after
+// XdndDrop but before SelectionNotify, and discarding them leaves the drop
+// position at 0,0 (#431, @unxed).
 func (p *Platform) waitForXdndSelectionNotify(w *x11Window) PlatformEvent {
-	deadline := time.Now().Add(time.Second)
+	deadline := time.Now().Add(2 * time.Second)
 	for {
 		if time.Now().After(deadline) {
 			slog.Warn("xdnd: SelectionNotify timeout")
@@ -287,9 +288,29 @@ func (p *Platform) waitForXdndSelectionNotify(w *x11Window) PlatformEvent {
 			continue
 		}
 
-		if notify, ok := event.(*SelectionNotifyEvent); ok {
-			if notify.Selection == p.xdnd.Selection && notify.Requestor == w.window {
-				return p.processXdndSelectionNotify(w, notify)
+		switch e := event.(type) {
+		case *SelectionNotifyEvent:
+			if e.Selection == p.xdnd.Selection && e.Requestor == w.window {
+				return p.processXdndSelectionNotify(w, e)
+			}
+
+		case *ClientMessageEvent:
+			if p.xdnd != nil && e.Type == p.xdnd.Position {
+				// Update position only — do NOT send XdndStatus after drop
+				// (spec does not allow target to answer positions post-drop).
+				data := e.Data32()
+				x := float64(data[2] >> 16)
+				y := float64(data[2] & 0xFFFF)
+				if w.window != 0 {
+					_, dstX, dstY, err := p.conn.TranslateCoordinates(
+						p.conn.RootWindow(), w.window, int16(data[2]>>16), int16(data[2]&0xFFFF))
+					if err == nil {
+						x = float64(dstX)
+						y = float64(dstY)
+					}
+				}
+				w.xdndState.lastX = x
+				w.xdndState.lastY = y
 			}
 		}
 	}
@@ -352,7 +373,7 @@ func (p *Platform) sendXdndStatus(w *x11Window, accept bool) {
 		action = uint32(p.xdnd.ActionCopy)
 	}
 
-	if err := p.conn.SendClientMessage(
+	if err := p.conn.SendClientMessageDirect(
 		w.xdndState.sourceWindow, // target for SendEvent
 		w.xdndState.sourceWindow, // window field
 		p.xdnd.Status,
@@ -381,7 +402,7 @@ func (p *Platform) sendXdndFinished(w *x11Window, accepted bool) {
 		action = uint32(p.xdnd.ActionCopy)
 	}
 
-	if err := p.conn.SendClientMessage(
+	if err := p.conn.SendClientMessageDirect(
 		w.xdndState.sourceWindow,
 		w.xdndState.sourceWindow,
 		p.xdnd.Finished,
