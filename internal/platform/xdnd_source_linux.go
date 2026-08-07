@@ -26,6 +26,7 @@ import (
 	"time"
 
 	"github.com/gogpu/gogpu/internal/platform/x11"
+	"github.com/gogpu/gpucontext"
 )
 
 // startXDNDDrag initiates an XDND drag session from the given X11 platform.
@@ -122,7 +123,6 @@ type xdndDragState struct {
 	targetAccepts bool
 	sourceWindow  x11.ResourceID
 	rootWindow    x11.ResourceID
-	started       bool
 }
 
 // runXDNDDragLoop runs the modal drag event loop.
@@ -131,17 +131,6 @@ func runXDNDDragLoop(p *x11.Platform, conn *x11.Connection, atoms *x11.XdndAtoms
 		sourceWindow: sourceWindow,
 		rootWindow:   conn.RootWindow(),
 	}
-
-	// Drain events queued before the grab — they belong to the application,
-	// not to this drag session. A stale ButtonRelease would end the gesture
-	// immediately (#431, @unxed).
-	for {
-		ev, err := conn.PollEventTimeout(0)
-		if err != nil || ev == nil {
-			break
-		}
-	}
-	ds.started = true
 
 	deadline := time.Now().Add(5 * time.Minute) // safety timeout
 
@@ -170,6 +159,27 @@ func (ds *xdndDragState) handleEvent(p *x11.Platform, conn *x11.Connection, atom
 		return ds.handleClientMessage(conn, atoms, e)
 
 	case *x11.ButtonReleaseEvent:
+		// Queue a PointerUp event so that the main loop's input state
+		// gets updated when the drag finishes. Otherwise, gogpu still
+		// thinks the mouse button is pressed because the drag's modal
+		// event loop consumed the release event.
+		scale := p.ScaleFactor()
+		x := float64(e.EventX) / scale
+		y := float64(e.EventY) / scale
+		pe := x11.PlatformEvent{
+			Type: x11.EventTypePointerUp,
+			Pointer: gpucontext.PointerEvent{
+				Type:        gpucontext.PointerUp,
+				PointerID:   1,
+				X:           x,
+				Y:           y,
+				PointerType: gpucontext.PointerTypeMouse,
+				IsPrimary:   true,
+				Button:      gpucontext.ButtonLeft,
+			},
+		}
+		p.QueueEvent(pe)
+
 		return ds.handleButtonRelease(p, conn, atoms)
 
 	case *x11.KeyPressEvent:
@@ -248,9 +258,12 @@ func dragResultFromFinished(atoms *x11.XdndAtoms, data [5]uint32) DragResult {
 }
 
 func (ds *xdndDragState) handleButtonRelease(p *x11.Platform, conn *x11.Connection, atoms *x11.XdndAtoms) (DragResult, bool) {
-	if !ds.started {
-		return 0, false
-	}
+	// Release the pointer grab immediately on button release.
+	// This frees the mouse for the entire X server, preventing deadlocks if the
+	// target displays a modal dialog (such as a file conflict prompt) during the drop.
+	_ = conn.UngrabPointer(x11.CurrentTime)
+	_ = conn.Flush()
+
 	if ds.currentTarget != 0 && ds.targetAccepts {
 		sendXdndDrop(conn, atoms, ds.sourceWindow, ds.currentTarget)
 		return ds.waitForXdndFinished(p, conn, atoms, 5*time.Second), true
